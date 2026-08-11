@@ -2318,388 +2318,303 @@ document.getElementById('restore-button').addEventListener('click', () => {
 
 
 <script>
-//versão 1006 do sistema de UNDO - REDO
-let undoStack = []; // Pilha de UNDO
-let redoStack = []; // Pilha de REDO
-let tempoDeEspera = 10800000; // Tempo de espera para debounce 10800000ms=3horas
-let lastSavedState = ""; // Último estado salvo
-const MAX_UNDO_STACK_SIZE = 200; // Limite da pilha de UNDO
-let debounceTimeout; // Variável para timeout do debounce
-let disableSaves = false; // Variável de controle para desativar os saves
-let preventNextSave = false; // Variável de controle para impedir o próximo save após duplo clique
+// versão 1007 do sistema de UNDO - REDO
+let undoStack = []; 
+let redoStack = []; 
+let tempoDeEspera = 10800000; 
+let lastSavedState = ""; 
+const MAX_UNDO_STACK_SIZE = 200; 
+let disableSaves = false; 
+let preventNextSave = false; 
 let isRestoringFromUndoRedo = false;
+let tableObserver = null; // Variável global para o vigia da mesa
 
+let debounceTimeout = null; 
 
-
-
-
-
-
-
-// Função para salvar o estado
-function saveState() {
-     if (disableSaves || isRestoringFromUndoRedo) return;  // bloqueia save se estiver restaurando
-    if (preventNextSave) {
-        preventNextSave = false;
-        return;
-    }
-
-    setTimeout(() => {
-        const tableArea = document.getElementById('table-area');
-        let currentState = tableArea.innerHTML;
-
-        // Remove borda azul visual (se presente) para evitar salvar visual temporário
-        currentState = currentState.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
-
-        // Salva apenas se for diferente do último
-        if (currentState !== lastSavedState) {
-            undoStack.push(currentState);
-            lastSavedState = currentState;
-
-            redoStack.length = 0; // Limpa a pilha de REDO ao registrar um novo estado
-
-            if (undoStack.length > MAX_UNDO_STACK_SIZE) {
-                undoStack.shift();
-            }
-
-            updateUndoRedoButtons();
-            console.log("✅ Estado salvo na pilha de UNDO.");
-        } else {
-            console.log("⛔ Estado repetido detectado, não salvo.");
-        }
-    }, 280);
-}
-
-
-
-
-
-
-
-
-
-
-// Função para adicionar debounce e evitar gravações excessivas // isso deve ser mantido pois evita gravaçoes em duplicata dunante movimentos continuos!
-function debouncedSaveState() {
-    clearTimeout(debounceTimeout);
-
-    debounceTimeout = setTimeout(() => {
-        if (isRestoringFromUndoRedo) return;  // Bloqueia save durante undo/redo
-
-        const tableArea = document.getElementById('table-area');
-        const currentState = tableArea.innerHTML;
-
-        if (currentState !== lastSavedState) {
-            saveState();
-        }
-    }, tempoDeEspera);
-}
-
-
-
-
-
-
-
-// Função para restaurar o último estado de UNDO
-function undo() {
-    if (undoStack.length > 1) {
-            isRestoringFromUndoRedo = true;  // <-- ativa flag
-
+let isPointerDown = false;
+document.addEventListener('pointerdown', () => { isPointerDown = true; });
+document.addEventListener('pointerup', (event) => { 
+    isPointerDown = false; 
     
-        const lastState = undoStack.pop();
-        redoStack.push(lastState);
-        console.log("🔁 UNDO realizado — estado movido para REDO:", lastState);
-        console.log("📦 redoStack atual:", redoStack);
+    // BLOQUEIO CRÍTICO: Se o clique foi em um botão (como Undo/Redo), NÃO SALVE!
+    if (event.target.tagName === 'BUTTON' || event.target.closest('button')) return;
+    
+    saveState(); 
+});
 
+function saveState() {
+    if (disableSaves || isRestoringFromUndoRedo || isPointerDown) return;
+    if (preventNextSave) { preventNextSave = false; return; }
+
+    clearTimeout(debounceTimeout);
+    debounceTimeout = setTimeout(() => {
         const tableArea = document.getElementById('table-area');
-        const previousState = undoStack[undoStack.length - 1];
-        tableArea.innerHTML = previousState;
+        if (!tableArea) return;
 
-        reativarFuncionalidadesMesa();
+        let currentHTML = tableArea.innerHTML.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
+        const currentLousa = (typeof exportarDesenhoLousa === 'function') ? exportarDesenhoLousa() : null;
 
-        document.querySelectorAll('.note').forEach(note => {
-            const isLocked = note.contentEditable === "false" || note.style.cursor === "not-allowed";
-            note.isLocked = isLocked;
-            note.contentEditable = isLocked ? "false" : "true";
-            note.style.cursor = isLocked ? "not-allowed" : "move";
-            note.title = isLocked ? "Nota Travada!" : "";
-            addDragFunctionality(note);
-            addNoteEvents(note);
-        });
+        if (currentHTML !== lastSavedState) {
+            undoStack.push({ html: currentHTML, lousa: currentLousa });
+            lastSavedState = currentHTML; 
+            redoStack.length = 0; // Limpa o REDO quando uma nova ação real é feita
 
-        lastSavedState = previousState; // sincroniza
-        updateUndoRedoButtons();
-        
-setTimeout(() => {
-    isRestoringFromUndoRedo = false;
-}, 1000); // espera 1 segundo antes de permitir saves novamente
-  
-        
-        
-        
-    } else {
-        console.log("❌ UNDO: Nenhum estado anterior.");
-    }
+            if (undoStack.length > MAX_UNDO_STACK_SIZE) undoStack.shift();
+            updateUndoRedoButtons();
+            console.log("✅ Estado salvo!");
+        }
+    }, 150); 
 }
 
+function undo() {
+ deselectCard(); //Teste que desseleciona a carta ou o dado antes da execução
 
+    if (undoStack.length > 1) {
+        isRestoringFromUndoRedo = true;
+        clearTimeout(debounceTimeout); // Cancela qualquer save engatilhado acidentalmente
+
+        // PAUSA O VIGIA: Para ele não confundir o Undo com uma ação do jogador
+        if (tableObserver) tableObserver.disconnect();
+
+        if (typeof isMoved !== 'undefined') isMoved = false; 
+        if (typeof startX !== 'undefined') startX = 0;
+
+        const tableArea = document.getElementById('table-area');
+        const htmlAtual = tableArea.innerHTML.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
+        const lousaAtual = (typeof exportarDesenhoLousa === 'function') ? exportarDesenhoLousa() : null;
+        
+        // Empurra o estado atual para o Redo antes de voltar
+        redoStack.push({ html: htmlAtual, lousa: lousaAtual });
+
+        if (typeof modoRegua !== 'undefined' && modoRegua && typeof pontosReguaUndo !== 'undefined' && pontosReguaUndo.length > 0) {
+            if (typeof ultimoPontoRegua !== 'undefined' && ultimoPontoRegua) pontosReguaRedo.push({ x: ultimoPontoRegua.x, y: ultimoPontoRegua.y });
+            ultimoPontoRegua = pontosReguaUndo.pop();
+        } else if (typeof modoRegua !== 'undefined' && modoRegua) {
+            ultimoPontoRegua = null;
+        }
+
+        undoStack.pop(); // Remove o presente
+        const prevState = undoStack[undoStack.length - 1]; // Resgata o passado
+
+        tableArea.innerHTML = prevState.html;
+        lastSavedState = prevState.html;
+
+        setTimeout(() => {
+            if (prevState.lousa && typeof importarDesenhoLousa === 'function') {
+                importarDesenhoLousa(prevState.lousa);
+            }
+            
+            if (typeof reativarFuncionalidadesMesa === 'function') reativarFuncionalidadesMesa();
+            
+            lastSavedState = tableArea.innerHTML.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
+            isRestoringFromUndoRedo = false;
+            updateUndoRedoButtons();
+            
+            if (typeof isMoved !== 'undefined') isMoved = false;
+
+            // RELIGA O VIGIA DEPOIS DE TUDO PRONTO
+            if (tableObserver) tableObserver.observe(tableArea, { childList: true, subtree: true, attributes: true });
+        }, 100); 
+    } else {
+        if (typeof mostrarToast === 'function') {
+            mostrarToast("Você já chegou no início do histórico.", "warning");
+        }
+    }
+}
 
 function redo() {
-    console.log("🔁 Tentando realizar REDO...");
-
+ deselectCard(); //Teste que desseleciona a carta ou o dado antes da execução
     if (redoStack.length > 0) {
-            isRestoringFromUndoRedo = true;  // <-- ativa flag
+        isRestoringFromUndoRedo = true;
+        clearTimeout(debounceTimeout); 
 
-    
-        const nextState = redoStack.pop();
-        console.log("✅ Estado recuperado da pilha de REDO.");
-        
-        // Empurra o estado atual de volta para a pilha de UNDO
-        undoStack.push(nextState);
+        // PAUSA O VIGIA
+        if (tableObserver) tableObserver.disconnect();
 
-        // Atualiza a interface com o estado recuperado
+        if (typeof isMoved !== 'undefined') isMoved = false; 
+        if (typeof startX !== 'undefined') startX = 0;
+
         const tableArea = document.getElementById('table-area');
-        tableArea.innerHTML = nextState;
+        const nextState = redoStack.pop(); // Pega o futuro
+        
+        // Salva o presente no Undo
+        const htmlAtual = tableArea.innerHTML.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
+        const lousaAtual = (typeof exportarDesenhoLousa === 'function') ? exportarDesenhoLousa() : null;
+        undoStack.push({ html: htmlAtual, lousa: lousaAtual });
 
-        // Reativa funcionalidades gerais
-        reativarFuncionalidadesMesa();
+        if (typeof modoRegua !== 'undefined' && modoRegua && typeof pontosReguaRedo !== 'undefined' && pontosReguaRedo.length > 0) {
+            if (typeof ultimoPontoRegua !== 'undefined' && ultimoPontoRegua) pontosReguaUndo.push({ x: ultimoPontoRegua.x, y: ultimoPontoRegua.y });
+            ultimoPontoRegua = pontosReguaRedo.pop();
+        }
 
-        // Reativa notas e verifica travamento
-        document.querySelectorAll('.note').forEach(note => {
-            const isLocked = note.contentEditable === "false" || note.style.cursor === "not-allowed";
-            note.isLocked = isLocked;
-            note.contentEditable = isLocked ? "false" : "true";
-            note.style.cursor = isLocked ? "not-allowed" : "move";
-            note.title = isLocked ? "Nota Travada!" : "";
+        tableArea.innerHTML = nextState.html;
+        lastSavedState = nextState.html;
 
-            addDragFunctionality(note);
-            addNoteEvents(note);
-        });
+        setTimeout(() => {
+            if (nextState.lousa && typeof importarDesenhoLousa === 'function') {
+                importarDesenhoLousa(nextState.lousa);
+            }
+            
+            if (typeof reativarFuncionalidadesMesa === 'function') reativarFuncionalidadesMesa();
+            
+            lastSavedState = tableArea.innerHTML.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
+            isRestoringFromUndoRedo = false;
+            updateUndoRedoButtons();
+            
+            if (typeof isMoved !== 'undefined') isMoved = false;
 
-        // Atualiza referência do último estado salvo
-        lastSavedState = nextState;
-
-        // Atualiza os botões de UNDO e REDO
-        updateUndoRedoButtons();
-
-
-setTimeout(() => {
-    isRestoringFromUndoRedo = false;
-}, 1000); // espera 1 segundo antes de permitir saves novamente
-
-
-        console.log("🔁 REDO realizado com sucesso.");
+            // RELIGA O VIGIA
+            if (tableObserver) tableObserver.observe(tableArea, { childList: true, subtree: true, attributes: true });
+        }, 100);
     } else {
-        console.log("❌ REDO: Nenhum estado na pilha de REDO.");
+        if (typeof mostrarToast === 'function') {
+            mostrarToast("Não há mais ações para refazer!", "warning");
+        }
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-// Função para atualizar os botões de UNDO e REDO
-// Função para atualizar os botões de UNDO e REDO
 function updateUndoRedoButtons() {
     const undoButton = document.getElementById('undo-button');
     const redoButton = document.getElementById('redo-button');
 
-    undoButton.disabled = undoStack.length <= 1;
-    redoButton.disabled = redoStack.length === 0;
+    if (!undoButton || !redoButton) return;
+
+    undoButton.disabled = false; 
+    redoButton.disabled = false;
+
+    if (undoStack.length <= 1) {
+        undoButton.style.opacity = "0.4";
+        undoButton.style.cursor = "default";
+    } else {
+        undoButton.style.opacity = "1";
+        undoButton.style.cursor = "pointer";
+    }
+
+    if (redoStack.length === 0) {
+        redoButton.style.opacity = "0.4";
+        redoButton.style.cursor = "default";
+    } else {
+        redoButton.style.opacity = "1";
+        redoButton.style.cursor = "pointer";
+    }
 }
 
-// Função para adicionar suporte a clique e toque nos botões
 function setupUndoRedoButtons() {
     const undoButton = document.getElementById('undo-button');
     const redoButton = document.getElementById('redo-button');
 
-    // Adiciona suporte a clique (mouse) e toque (celular)
-    ["click", "touchstart"].forEach(eventType => {
-        undoButton.addEventListener(eventType, (event) => {
-            event.preventDefault(); // Evita toques duplos acidentais
-            undo();
-        });
-
-        redoButton.addEventListener(eventType, (event) => {
-            event.preventDefault(); // Evita toques duplos acidentais
-            redo();
-        });
-    });
+    if (undoButton && redoButton) {
+        undoButton.addEventListener("click", undo);
+        redoButton.addEventListener("click", redo);
+    }
 }
 
-
-
-
-
-
-// Configura os botões de UNDO e REDO ao carregar a página
 document.addEventListener("DOMContentLoaded", setupUndoRedoButtons);
 
-
-
-
-
-
-
-
-
-// Observador de mudanças na tabela
 function setupTableObserver() {
     const tableArea = document.getElementById('table-area');
+    if (!tableArea) return;
 
-    const observer = new MutationObserver((mutations) => {
+    tableObserver = new MutationObserver((mutations) => {
         let stateChanged = false;
 
         mutations.forEach((mutation) => {
             if (mutation.type === "childList") {
-                mutation.addedNodes.forEach(node => console.log(`➕ Adicionado: ${node.nodeName}`));
-                mutation.removedNodes.forEach(node => console.log(`➖ Removido: ${node.nodeName}`));
                 stateChanged = true;
             }
 
             if (mutation.type === "attributes") {
-                // Verifica se o atributo alterado é 'data-rotation' ou 'data-flipped'
-                if (mutation.attributeName === "data-rotation" || mutation.attributeName === "data-flipped") {
-                    console.log(`⚙ Atributo alterado: ${mutation.attributeName}`);
+                if (mutation.attributeName === "data-rotation" || 
+                    mutation.attributeName === "data-flipped" ||
+                    mutation.attributeName === "src" || 
+                    mutation.attributeName === "data-original-src") {
                     stateChanged = true;
                 }
-
-                // Ignora alterações de estilo em imagens
                 if (mutation.target.tagName === "IMG" && mutation.attributeName === "style") return;
             }
         });
 
-        if (stateChanged) {
-            debouncedSaveState(); // Chama a função de salvar o estado com debounce
-        }
+        if (stateChanged) saveState(); 
     });
 
-    observer.observe(tableArea, {
-        childList: true,  // Observa adições ou remoções de nós
-        subtree: true,    // Observa todos os elementos abaixo do tableArea
-        attributes: true, // Observa mudanças de atributos
-    });
+    tableObserver.observe(tableArea, { childList: true, subtree: true, attributes: true });
 }
 
-
-
-
-// Variável para armazenar o tempo do último clique
 let lastClickTime = 0; 
-let isDoubleClick = false; // Variável para verificar se é um duplo clique
+let isDoubleClick = false; 
 
-// Eventos para salvar estado ao terminar ações do usuário com detecção de duplo clique
-document.getElementById('table-area').addEventListener('mouseup', (event) => {
-    const currentTime = new Date().getTime();
-    if (currentTime - lastClickTime <= 500) {  // Verifica se o tempo entre cliques é curto o suficiente para ser considerado um duplo clique
-        isDoubleClick = true; // Detecta duplo clique
-        console.log("⚠️ Duplo clique detectado.");
-        preventNextSave = true; // Impede o próximo save
-        return;  // Não executa o save para o clique simples
-    }
-    lastClickTime = currentTime;  // Atualiza o tempo do último clique
+const tableAreaElem = document.getElementById('table-area');
+if (tableAreaElem) {
+    const handleDoubleTap = (event) => {
+        const currentTime = new Date().getTime();
+        if (currentTime - lastClickTime <= 500) {  
+            isDoubleClick = true; 
+            preventNextSave = true; 
+            return;  
+        }
+        lastClickTime = currentTime;  
 
-    // Se não for duplo clique, executa o save
-    if (!isDoubleClick) {
-        saveState();
-    }
-});
+        if (!isDoubleClick) {
+            saveState();
+        }
+    };
+    tableAreaElem.addEventListener('mouseup', handleDoubleTap);
+    tableAreaElem.addEventListener('touchend', handleDoubleTap);
+}
 
-// Adiciona o mesmo comportamento para toque
-document.getElementById('table-area').addEventListener('touchend', (event) => {
-    const currentTime = new Date().getTime();
-    if (currentTime - lastClickTime <= 500) {  // Detecção de toque duplo
-        isDoubleClick = true; // Detecta duplo toque
-        console.log("⚠️ Duplo toque detectado.");
-        preventNextSave = true; // Impede o próximo save
-        return;  // Não executa o save para o toque simples
-    }
-    lastClickTime = currentTime;  // Atualiza o tempo do último toque
-
-    // Se não for duplo toque, executa o save
-    if (!isDoubleClick) {
-        saveState();
-    }
-});
-
-
-
-
-// ✅ NOVA FUNÇÃO: Captura cliques e toques em imagens FORA da mesa e salva o estado
 function setupOutsideImageClickListener() {
-    document.body.addEventListener("click", (event) => {
-            if (isRestoringFromUndoRedo) return;  // <-- bloqueia save durante UNDO/REDO
-
+    const handler = (event) => {
+        if (isRestoringFromUndoRedo) return;  
         
+        // BLOQUEIO CRÍTICO: Não faça nada se clicou em um botão!
+        if (event.target.tagName === "BUTTON" || event.target.closest('button')) return;
+
         const tableArea = document.getElementById("table-area");
-        const isInsideTable = tableArea.contains(event.target);  // Verifica se o clique foi dentro da mesa
-        const isImage = event.target.tagName === "IMG";  // Verifica se o alvo do clique é uma imagem
-        const isPopup = event.target.closest(".popup");  // Verifica se o clique ocorreu dentro de um popup
+        if (!tableArea) return;
+        
+        const isInsideTable = tableArea.contains(event.target);  
+        const isImage = event.target.tagName === "IMG";  
+        const isPopup = event.target.closest(".popup");  
 
-        // Verifica se o clique foi fora da mesa ou em uma imagem/popup
         if (!isInsideTable || isImage || isPopup) {
-            console.log("Clique fora da mesa ou em um popup. Salvando estado...");
-if (!isRestoringFromUndoRedo) {
-    saveState();
-}
+            saveState();
         }
-    });
+    };
 
-    // Adiciona suporte para toques em dispositivos móveis (touchstart)
-    document.body.addEventListener("touchstart", (event) => {
-           if (isRestoringFromUndoRedo) return;  // <-- bloqueia save durante UNDO/REDO
-
-       
-        const tableArea = document.getElementById("table-area");
-        const isInsideTable = tableArea.contains(event.target);  // Verifica se o toque foi dentro da mesa
-        const isImage = event.target.tagName === "IMG";  // Verifica se o alvo do toque é uma imagem
-        const isPopup = event.target.closest(".popup");  // Verifica se o toque ocorreu dentro de um popup
-
-        // Verifica se o toque foi fora da mesa ou em uma imagem/popup
-        if (!isInsideTable || isImage || isPopup) {
-            console.log("Toque fora da mesa ou em um popup. Salvando estado...");
-if (!isRestoringFromUndoRedo) {
-    saveState();
-}
-        }
-    });
+    document.body.addEventListener("click", handler);
+    document.body.addEventListener("touchstart", handler);
 }
 
-// Função para restaurar a página
 function restorePage() {
-    console.log("Restaurando a página...");
     saveState();
-    loadFromBackup();  // Supondo que você tenha essa função
+    if (typeof loadFromBackup === 'function') loadFromBackup();  
 }
 
-// Salva o estado inicial ao carregar a página
 window.addEventListener('DOMContentLoaded', () => {
     setupTableObserver();
-    setupOutsideImageClickListener(); // Ativa a nova funcionalidade chamando a função de ao clicar ou tocar numa imagem fora da mesa um save é realizado
+    setupOutsideImageClickListener(); 
+
+    setTimeout(() => {
+        const tableArea = document.getElementById('table-area');
+        if (tableArea) {
+            const htmlInicial = tableArea.innerHTML.replace(/border:\s*\d+px\s+dashed\s+blue;/g, '').trim();
+            const lousaInicial = (typeof exportarDesenhoLousa === 'function') ? exportarDesenhoLousa() : null;
+            undoStack.push({ html: htmlInicial, lousa: lousaInicial });
+            lastSavedState = htmlInicial;
+            updateUndoRedoButtons();
+            console.log("✅ Estado zero da mesa salvo!");
+        }
+    }, 500);
 });
-
-
-
-
-function normalizeHTML(html) {
-    // Remove espaços extras, bordas visuais e normaliza aspas
-    return html
-        .replace(/\s+/g, ' ')                       // Remove espaços em excesso
-        .replace(/border:\s*\d+px\s+dashed\s+blue;/g, '') // Remove borda azul
-        .replace(/"/g, "'")                         // Uniformiza aspas
-        .trim();
-}
-
-
 </script>
+
+
+
+
+
+
+
+
                
                  
 
@@ -3277,6 +3192,7 @@ ativarMesaQuandoEstiverPronta();
 
 
 <script>
+//versão 1007
 // ==========================================
 // CONTROLES FLUTUANTES DO DADO (+ / ↻ / -)
 // ==========================================
@@ -3495,11 +3411,16 @@ setInterval(() => {
         if (isDado) {
             diceControls.style.display = 'flex';
             
-            // Atualiza a prévia do número que vai aparecer ao virar
+            // Atualiza a prévia do número que vai aparecer ao virar APENAS se mudar
             const previewSpan = document.getElementById('flip-preview');
             if (previewSpan) {
                 const proximoNum = calcularProximoNumeroOposto(selectedCard);
-                previewSpan.innerText = proximoNum !== null ? proximoNum : '';
+                const novoTexto = proximoNum !== null ? proximoNum.toString() : '';
+                
+                // AQUI ESTÁ A MÁGICA: Só altera o DOM se for realmente necessário
+                if (previewSpan.innerText !== novoTexto) {
+                    previewSpan.innerText = novoTexto;
+                }
             }
             
             const left = parseFloat(selectedCard.style.left) || selectedCard.offsetLeft;
@@ -3521,6 +3442,7 @@ setInterval(() => {
 // FIM DOS CONTROLES FLUTUANTES DO DADO
 // ==========================================
 </script>
+
 
 
 
